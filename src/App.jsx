@@ -574,9 +574,18 @@ const PersonalFinanceApp = ({ user, handleLogout }) => {
     localStorage.setItem("transactions", JSON.stringify(transactions));
   }, [transactions]);
 
-  const [accounts, setAccounts] = useState([]); // State baru
-  const [incomeCategories, setIncomeCategories] = useState([]); // State baru
-  const [expenseCategories, setExpenseCategories] = useState([]); // State baru
+  const [accounts, setAccounts] = useState(() => {
+    const cached = localStorage.getItem("accounts");
+    return cached ? JSON.parse(cached) : [];
+  });
+  const [incomeCategories, setIncomeCategories] = useState(() => {
+    const cached = localStorage.getItem("incomeCategories");
+    return cached ? JSON.parse(cached) : [];
+  });
+  const [expenseCategories, setExpenseCategories] = useState(() => {
+    const cached = localStorage.getItem("expenseCategories");
+    return cached ? JSON.parse(cached) : [];
+  });
   const [isLoading, setIsLoading] = useState(true);
 
   const initialFormState = {
@@ -637,12 +646,48 @@ const PersonalFinanceApp = ({ user, handleLogout }) => {
       if (user) {
         setIsLoading(true);
 
+        // --- Perbaikan: Logika Baca dari Cache di Sini ---
+        const cachedAccounts = localStorage.getItem("accounts");
+        const cachedIncomeCategories = localStorage.getItem("incomeCategories");
+        const cachedExpenseCategories =
+          localStorage.getItem("expenseCategories");
+
+        if (cachedAccounts) {
+          setAccounts(JSON.parse(cachedAccounts));
+        }
+        if (cachedIncomeCategories) {
+          setIncomeCategories(JSON.parse(cachedIncomeCategories));
+        }
+        if (cachedExpenseCategories) {
+          setExpenseCategories(JSON.parse(cachedExpenseCategories));
+        }
+        // --- Akhir Perbaikan ---
+
+        // Ambil data accounts sesuai user
         let { data: accountsData, error: accountsError } = await supabase
           .from("accounts")
-          .select("*");
+          .select("*")
+          .eq("user_id", user.id);
+
+        // Ambil data categories sesuai user
         let { data: categoriesData, error: categoriesError } = await supabase
           .from("categories")
-          .select("*");
+          .select("*")
+          .eq("user_id", user.id);
+
+        if (!accountsError) {
+          setAccounts(accountsData);
+          localStorage.setItem("accounts", JSON.stringify(accountsData));
+        }
+
+        if (!categoriesError) {
+          const income = categoriesData.filter((c) => c.type === "income");
+          const expense = categoriesData.filter((c) => c.type === "expense");
+          setIncomeCategories(income);
+          setExpenseCategories(expense);
+          localStorage.setItem("incomeCategories", JSON.stringify(income));
+          localStorage.setItem("expenseCategories", JSON.stringify(expense));
+        }
 
         // Jika pengguna baru dan belum punya akun, buatkan default
         if (accountsData && accountsData.length === 0) {
@@ -657,7 +702,7 @@ const PersonalFinanceApp = ({ user, handleLogout }) => {
             .insert(defaultAccounts)
             .select();
           if (error) console.error("Error creating default accounts:", error);
-          else accountsData = data; // Gunakan data yang baru dibuat
+          else accountsData = data;
         }
 
         // Jika pengguna baru dan belum punya kategori, buatkan default
@@ -676,30 +721,26 @@ const PersonalFinanceApp = ({ user, handleLogout }) => {
             .insert(defaultCategories)
             .select();
           if (error) console.error("Error creating default categories:", error);
-          else categoriesData = data; // Gunakan data yang baru dibuat
+          else categoriesData = data;
         }
 
+        // Ambil transaksi sesuai user
         const { data: transactionsData, error: transactionsError } =
           await supabase
             .from("transactions")
-            .select("*, accounts(name), categories(name)")
+            .select("*, accounts:account_id(*), categories:category_id(*)")
+            .eq("user_id", user.id)
             .order("date", { ascending: false });
 
         if (accountsError || categoriesError || transactionsError) {
           console.error(accountsError || categoriesError || transactionsError);
         } else {
-          setTransactions(transactionsData);
-          setAccounts(accountsData);
-          setIncomeCategories(
-            categoriesData.filter((c) => c.type === "income")
-          );
-          setExpenseCategories(
-            categoriesData.filter((c) => c.type === "expense")
-          );
+          setTransactions(transactionsData || []);
         }
         setIsLoading(false);
       }
     };
+
     fetchData();
   }, [user]);
 
@@ -747,7 +788,6 @@ const PersonalFinanceApp = ({ user, handleLogout }) => {
     const amountValue = parseFloat(formState.amount);
     const categoryName = formState.category_name?.trim();
 
-    // Validasi input
     if (
       !formState.account_id ||
       !categoryName ||
@@ -762,7 +802,9 @@ const PersonalFinanceApp = ({ user, handleLogout }) => {
       return;
     }
 
-    // Cari kategori yang ada atau buat yang baru
+    const isOnline = navigator.onLine;
+
+    // tentukan category_id (sama seperti logika kamu)
     let category_id;
     const currentCategories =
       formState.type === "expense" ? expenseCategories : incomeCategories;
@@ -772,30 +814,37 @@ const PersonalFinanceApp = ({ user, handleLogout }) => {
 
     if (existingCategory) {
       category_id = existingCategory.id;
-    } else {
-      // Buat kategori baru jika tidak ditemukan
+    } else if (isOnline) {
       const { data, error } = await supabase
         .from("categories")
         .insert({ name: categoryName, type: formState.type, user_id: user.id })
         .select()
         .single();
-
       if (error) {
         showAlert("Gagal", "Gagal membuat kategori baru.");
         return;
       }
       category_id = data.id;
-      // Perbarui state lokal agar kategori baru langsung muncul
       if (data.type === "expense")
         setExpenseCategories((prev) => [...prev, data]);
       else setIncomeCategories((prev) => [...prev, data]);
+    } else {
+      showAlert(
+        "Gagal",
+        "Tidak dapat membuat kategori baru saat offline. Silakan pilih kategori yang sudah ada."
+      );
+      return;
     }
 
-    // Siapkan data transaksi untuk disimpan
+    if (!user) {
+      showAlert("Error", "Anda harus login sebelum menyimpan transaksi.");
+      return;
+    }
+
     const transactionData = {
       user_id: user.id,
       account_id: formState.account_id,
-      category_id, // hasil lookup kategori atau kategori baru
+      category_id,
       date: formState.date,
       type: formState.type,
       amount: amountValue,
@@ -803,22 +852,53 @@ const PersonalFinanceApp = ({ user, handleLogout }) => {
       notes: formState.notes || null,
       cleared: !!formState.cleared,
     };
-    delete transactionData.category_name; // Hapus properti sementara
 
-    // Simpan transaksi
-    const { data: newTransaction, error } = await supabase
-      .from("transactions")
-      .insert(transactionData)
-      .select("*, accounts(name), categories(name)")
-      .single();
+    // Coba insert online dulu, fallback ke pending jika gagal
+    if (isOnline) {
+      try {
+        const { data: newTransaction, error } = await supabase
+          .from("transactions")
+          .insert(transactionData)
+          .select("*, accounts:account_id(name), categories:category_id(name)")
+          .single();
 
-    if (error) {
-      console.error("Error adding transaction:", error);
-      showAlert("Gagal", "Transaksi baru gagal disimpan.");
-    } else {
-      setTransactions((prev) => [newTransaction, ...prev]);
-      setFormState(initialFormState); // Reset form
+        if (error) throw error;
+
+        setTransactions((prev) => [newTransaction, ...prev]);
+        setFormState(initialFormState);
+        showAlert("Sukses", "Transaksi berhasil disimpan.");
+        return;
+      } catch (err) {
+        console.warn("Insert online gagal, fallback ke pending:", err);
+        // lanjut ke penyimpanan lokal
+      }
     }
+
+    // Offline / fallback: simpan ke pending
+    const tempId = `temp-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+    const pending = JSON.parse(
+      localStorage.getItem("pendingTransactions") || "[]"
+    );
+    pending.push({ __temp_id: tempId, ...transactionData });
+    localStorage.setItem("pendingTransactions", JSON.stringify(pending));
+
+    const localTx = {
+      id: tempId,
+      __is_local: true,
+      ...transactionData,
+      accounts:
+        accounts.find((a) => a.id === transactionData.account_id) || null,
+      categories:
+        [...incomeCategories, ...expenseCategories].find(
+          (c) => c.id === transactionData.category_id
+        ) || null,
+    };
+    setTransactions((prev) => [localTx, ...prev]);
+    setFormState(initialFormState);
+    showAlert(
+      "Offline",
+      "Transaksi disimpan secara lokal. Akan diunggah saat online."
+    );
   };
 
   const handleEdit = (transaction) => {
@@ -829,20 +909,62 @@ const PersonalFinanceApp = ({ user, handleLogout }) => {
   const handleUpdate = async (updatedTransaction) => {
     const { id, ...updateData } = updatedTransaction;
 
-    const { data, error } = await supabase
-      .from("transactions")
-      .update(updateData)
-      .eq("id", id)
-      .select();
+    // 🔥 Kalau transaksi masih offline (__temp_id)
+    if (String(id).startsWith("temp-")) {
+      let pending = JSON.parse(
+        localStorage.getItem("pendingTransactions") || "[]"
+      );
+      pending = pending.map((t) =>
+        t.__temp_id === id ? { ...t, ...updateData } : t
+      );
+      localStorage.setItem("pendingTransactions", JSON.stringify(pending));
 
-    if (error) {
-      console.error("Error updating transaction:", error);
-      showAlert("Gagal", "Gagal memperbarui transaksi.");
-    } else {
-      setTransactions((prev) => prev.map((t) => (t.id === id ? data[0] : t)));
+      setTransactions((prev) =>
+        prev.map((t) => (t.id === id ? { ...t, ...updateData } : t))
+      );
+
       setIsUpdateModalOpen(false);
       setTransactionToEdit(null);
+      showAlert("Offline", "Perubahan transaksi lokal tersimpan.");
+      return;
     }
+
+    // 🔥 Kalau transaksi sudah ada di server
+    const isOnline = navigator.onLine;
+    if (isOnline) {
+      try {
+        const { data, error } = await supabase
+          .from("transactions")
+          .update(updateData)
+          .eq("id", id)
+          .select()
+          .single();
+        if (error) throw error;
+
+        setTransactions((prev) => prev.map((t) => (t.id === id ? data : t)));
+        setIsUpdateModalOpen(false);
+        setTransactionToEdit(null);
+        return;
+      } catch (err) {
+        console.warn("Update online gagal, fallback ke pendingUpdates:", err);
+      }
+    }
+
+    // fallback offline biasa
+    const pendingUpdates = JSON.parse(
+      localStorage.getItem("pendingUpdates") || "[]"
+    );
+    pendingUpdates.push({ id, updateData });
+    localStorage.setItem("pendingUpdates", JSON.stringify(pendingUpdates));
+
+    setTransactions((prev) =>
+      prev.map((t) =>
+        t.id === id ? { ...t, ...updateData, __is_local: true } : t
+      )
+    );
+    setIsUpdateModalOpen(false);
+    setTransactionToEdit(null);
+    showAlert("Offline", "Update disimpan lokal. Akan diunggah saat online.");
   };
 
   const handleDelete = (id) => {
@@ -851,17 +973,37 @@ const PersonalFinanceApp = ({ user, handleLogout }) => {
       title: "Konfirmasi Hapus",
       message: "Apakah Anda yakin ingin menghapus transaksi ini?",
       onConfirm: async () => {
-        const { error } = await supabase
-          .from("transactions")
-          .delete()
-          .eq("id", id);
-        if (error) {
-          console.error("Error deleting transaction:", error);
-          showAlert("Gagal", "Gagal menghapus transaksi.");
-        } else {
-          setTransactions(transactions.filter((t) => t.id !== id));
+        const isOnline = navigator.onLine;
+
+        if (isOnline) {
+          try {
+            const { error } = await supabase
+              .from("transactions")
+              .delete()
+              .eq("id", id);
+            if (error) throw error;
+
+            setTransactions((prev) => prev.filter((t) => t.id !== id));
+            setModalState({ show: false });
+            return;
+          } catch (err) {
+            console.warn("Delete online gagal, fallback ke offline:", err);
+          }
         }
+
+        // Offline fallback
+        const pendingDeletes = JSON.parse(
+          localStorage.getItem("pendingDeletes") || "[]"
+        );
+        pendingDeletes.push({ id });
+        localStorage.setItem("pendingDeletes", JSON.stringify(pendingDeletes));
+
+        setTransactions((prev) => prev.filter((t) => t.id !== id));
         setModalState({ show: false });
+        showAlert(
+          "Offline",
+          "Hapus disimpan lokal. Akan disinkronkan ke server saat online."
+        );
       },
       onCancel: () => setModalState({ show: false }),
       confirmText: "Hapus",
@@ -1374,6 +1516,388 @@ const PersonalFinanceApp = ({ user, handleLogout }) => {
     };
   }, []);
 
+  const isSyncingRef = React.useRef(false);
+
+  // --- helper: hapus field internal sebelum kirim ke server ---
+  const cleanHelpers = (obj = {}) => {
+    const copy = { ...obj };
+    // hapus known helpers
+    delete copy.__temp_id;
+    delete copy.__is_local;
+    delete copy.accounts;
+    delete copy.categories;
+    delete copy.payload;
+    // hapus semua key yang diawali __ untuk safety
+    Object.keys(copy).forEach((k) => {
+      if (k.startsWith("__")) delete copy[k];
+    });
+    return copy;
+  };
+
+  // --- helper: replace temp IDs in pendingUpdates & pendingDeletes ---
+  const replaceTempIdsInPending = (tempToReal = {}) => {
+    // pendingUpdates: { id, updateData }
+    let pendingUpdates = JSON.parse(
+      localStorage.getItem("pendingUpdates") || "[]"
+    );
+    let changed = false;
+    pendingUpdates = pendingUpdates.map((u) => {
+      const newU = { ...u };
+      if (tempToReal[String(u.id)]) {
+        newU.id = tempToReal[String(u.id)];
+        changed = true;
+      }
+      // also replace nested account_id/category_id if they reference temp ids
+      if (newU.updateData) {
+        if (tempToReal[String(newU.updateData.account_id)]) {
+          newU.updateData = {
+            ...newU.updateData,
+            account_id: tempToReal[String(newU.updateData.account_id)],
+          };
+          changed = true;
+        }
+        if (tempToReal[String(newU.updateData.category_id)]) {
+          newU.updateData = {
+            ...newU.updateData,
+            category_id: tempToReal[String(newU.updateData.category_id)],
+          };
+          changed = true;
+        }
+      }
+      return newU;
+    });
+    if (changed) {
+      localStorage.setItem("pendingUpdates", JSON.stringify(pendingUpdates));
+    }
+
+    // pendingDeletes: array of { id }
+    let pendingDeletes = JSON.parse(
+      localStorage.getItem("pendingDeletes") || "[]"
+    );
+    let changedDel = false;
+    pendingDeletes = pendingDeletes.map((d) => {
+      const newId = tempToReal[String(d.id)] || d.id;
+      if (newId !== d.id) changedDel = true;
+      return { id: newId };
+    });
+    if (changedDel) {
+      localStorage.setItem("pendingDeletes", JSON.stringify(pendingDeletes));
+    }
+  };
+
+  // --- improved syncTransactions (insert) ---
+  const syncTransactions = async () => {
+    if (!user) return;
+
+    let pending = JSON.parse(
+      localStorage.getItem("pendingTransactions") || "[]"
+    );
+    if (!pending || pending.length === 0) return;
+    if (isSyncingRef.current) return;
+    isSyncingRef.current = true;
+
+    const results = { success: [], failed: [] };
+    const remaining = [];
+    const tempToReal = {}; // map tempId -> real id
+
+    for (const p of pending) {
+      // p may be either a flat payload or { payload: ... }
+      const raw = p.payload || p;
+      const tempId =
+        p.__temp_id || raw.__temp_id || raw.id?.startsWith?.("temp-")
+          ? raw.id
+          : null;
+
+      // build final payload
+      const payload = { ...raw };
+      // ensure user_id
+      payload.user_id = payload.user_id || user.id;
+
+      // clean helpers
+      const finalPayload = cleanHelpers(payload);
+
+      try {
+        // Resolve account/category if they are missing or are temp IDs
+        if (
+          !finalPayload.account_id ||
+          String(finalPayload.account_id).startsWith("temp-")
+        ) {
+          const accName =
+            payload.account_name ||
+            p.accounts?.name ||
+            (typeof p.account === "string" ? p.account : null);
+          if (!accName) throw new Error("Missing account information");
+          let foundAcc = accounts.find(
+            (a) => a.name?.toLowerCase() === accName.toLowerCase()
+          );
+          if (!foundAcc) {
+            const { data: createdAcc, error: accErr } = await supabase
+              .from("accounts")
+              .insert({ name: accName, user_id: user.id })
+              .select()
+              .single();
+            if (accErr) throw accErr;
+            foundAcc = createdAcc;
+            setAccounts((prev) => {
+              const next = [...prev, createdAcc];
+              localStorage.setItem("accounts", JSON.stringify(next));
+              return next;
+            });
+          }
+          finalPayload.account_id = foundAcc.id;
+        }
+
+        if (
+          !finalPayload.category_id ||
+          String(finalPayload.category_id).startsWith("temp-")
+        ) {
+          const catName =
+            payload.category_name ||
+            p.categories?.name ||
+            (typeof p.category === "string" ? p.category : null);
+          if (!catName) throw new Error("Missing category information");
+          const foundCat = [...incomeCategories, ...expenseCategories].find(
+            (c) => c.name?.toLowerCase() === catName.toLowerCase()
+          );
+          if (foundCat) {
+            finalPayload.category_id = foundCat.id;
+          } else {
+            const { data: createdCat, error: catErr } = await supabase
+              .from("categories")
+              .insert({
+                name: catName,
+                type: payload.type || "expense",
+                user_id: user.id,
+              })
+              .select()
+              .single();
+            if (catErr) throw catErr;
+            finalPayload.category_id = createdCat.id;
+            if (createdCat.type === "income") {
+              setIncomeCategories((prev) => {
+                const next = [...prev, createdCat];
+                localStorage.setItem("incomeCategories", JSON.stringify(next));
+                return next;
+              });
+            } else {
+              setExpenseCategories((prev) => {
+                const next = [...prev, createdCat];
+                localStorage.setItem("expenseCategories", JSON.stringify(next));
+                return next;
+              });
+            }
+          }
+        }
+
+        // final safety clean
+        Object.keys(finalPayload).forEach((k) => {
+          if (k.startsWith("__")) delete finalPayload[k];
+        });
+
+        // 🚨 fix tambahan → buang field yang bukan milik tabel transactions
+        delete finalPayload.account_name;
+        delete finalPayload.category_name;
+
+        // kalau masih ada id temp → buang juga
+        if (String(finalPayload.id || "").startsWith("temp-")) {
+          delete finalPayload.id;
+        }
+
+        const { data, error } = await supabase
+          .from("transactions")
+          .insert(finalPayload) // kirim tanpa id temp
+          .select("*, accounts:account_id(*), categories:category_id(*)")
+          .single();
+
+        if (error) {
+          console.error("Insert gagal:", error, finalPayload);
+          results.failed.push({ p, error });
+          remaining.push(p);
+          continue;
+        }
+
+        // replace local temp in UI with server row
+        setTransactions((prev) => {
+          const replaced = prev.map((t) =>
+            t.id === tempId || t.id === raw.id ? data : t
+          );
+          const exists = replaced.some((r) => r.id === data.id);
+          return (exists ? replaced : [data, ...replaced]).sort(
+            (a, b) => new Date(b.date) - new Date(a.date)
+          );
+        });
+
+        // register mapping temp -> real id
+        if (tempId) tempToReal[String(tempId)] = data.id;
+
+        results.success.push({ p, data });
+      } catch (err) {
+        console.error("Sync transaksi gagal untuk item:", p, err);
+        results.failed.push({ p, error: err });
+        remaining.push(p);
+      }
+    } // end for pending
+
+    // save the remaining pending transactions
+    if (remaining.length > 0)
+      localStorage.setItem("pendingTransactions", JSON.stringify(remaining));
+    else localStorage.removeItem("pendingTransactions");
+
+    // Replace references in pendingUpdates/pendingDeletes so subsequent syncs use real IDs
+    if (Object.keys(tempToReal).length > 0) {
+      replaceTempIdsInPending(tempToReal);
+    }
+
+    // Now sync updates & deletes (after we've attempted to fix IDs)
+    await syncUpdates();
+    await syncDeletes();
+
+    isSyncingRef.current = false;
+
+    // user notification
+    if (results.failed.length === 0) {
+      showAlert(
+        "✅ Sinkronisasi Sukses",
+        `${results.success.length} transaksi berhasil diunggah.`
+      );
+    } else {
+      showAlert(
+        "⚠️ Sinkronisasi Parsial",
+        `${results.success.length} berhasil, ${results.failed.length} gagal.`
+      );
+      console.warn("Detail kegagalan sync:", results.failed);
+    }
+  };
+
+  // helper untuk membersihkan data update
+  const sanitizeUpdateData = (data = {}) => {
+    const copy = { ...data };
+    // hapus field helper
+    delete copy.__temp_id;
+    delete copy.__is_local;
+    delete copy.accounts;
+    delete copy.categories;
+    Object.keys(copy).forEach((k) => {
+      if (k.startsWith("__")) delete copy[k];
+    });
+    return copy;
+  };
+
+  // --- improved syncUpdates (defensive) ---
+  const syncUpdates = async () => {
+    let pending = JSON.parse(localStorage.getItem("pendingUpdates") || "[]");
+    if (!pending || pending.length === 0) return;
+
+    console.log("syncUpdates: found pending updates", pending);
+
+    const remaining = [];
+    for (const u of pending) {
+      // if id is still a temp id, skip for now (it should be replaced after inserts)
+      if (String(u.id).startsWith("temp-")) {
+        remaining.push(u);
+        continue;
+      }
+
+      // sanitize and clean
+      const sanitized = sanitizeUpdateData(u.updateData || u);
+      // avoid updating with nested helper fields
+      Object.keys(sanitized).forEach((k) => {
+        if (k.startsWith("__")) delete sanitized[k];
+      });
+
+      // if account/category refer to temp ids, skip and let it be retried later
+      if (
+        sanitized.account_id &&
+        String(sanitized.account_id).startsWith("temp-")
+      ) {
+        remaining.push(u);
+        continue;
+      }
+      if (
+        sanitized.category_id &&
+        String(sanitized.category_id).startsWith("temp-")
+      ) {
+        remaining.push(u);
+        continue;
+      }
+
+      try {
+        const { data, error } = await supabase
+          .from("transactions")
+          .update(sanitized)
+          .eq("id", u.id)
+          .select("*, accounts:account_id(*), categories:category_id(*)")
+          .maybeSingle(); // use maybeSingle to avoid exceptions when no rows
+
+        if (error) throw error;
+
+        if (data) {
+          setTransactions((prev) =>
+            prev.map((t) => (t.id === u.id ? data : t))
+          );
+        } else {
+          // no row returned (maybe was deleted on server) — we treat as resolved and remove from pending
+          console.warn(
+            "syncUpdates: no row returned for id",
+            u.id,
+            "- removing pending update."
+          );
+        }
+      } catch (err) {
+        console.error("syncUpdates failed for item:", u, err);
+        remaining.push(u);
+      }
+    }
+
+    if (remaining.length > 0)
+      localStorage.setItem("pendingUpdates", JSON.stringify(remaining));
+    else localStorage.removeItem("pendingUpdates");
+  };
+
+  // --- improved syncDeletes (defensive) ---
+  const syncDeletes = async () => {
+    let pending = JSON.parse(localStorage.getItem("pendingDeletes") || "[]");
+    if (!pending || pending.length === 0) return;
+
+    const remaining = [];
+    for (const d of pending) {
+      // If id is temp, we can simply drop it (it never existed on server)
+      if (String(d.id).startsWith("temp-")) {
+        // ensure local removal
+        setTransactions((prev) => prev.filter((t) => t.id !== d.id));
+        continue; // nothing to do server-side
+      }
+
+      try {
+        const { data, error } = await supabase
+          .from("transactions")
+          .delete()
+          .eq("id", d.id)
+          .maybeSingle(); // safe if row doesn't exist
+
+        if (error) throw error;
+
+        // remove from local UI (even if server had already removed, that's fine)
+        setTransactions((prev) => prev.filter((t) => t.id !== d.id));
+      } catch (err) {
+        console.error("Sync delete gagal:", err);
+        remaining.push(d);
+      }
+    }
+
+    if (remaining.length > 0)
+      localStorage.setItem("pendingDeletes", JSON.stringify(remaining));
+    else localStorage.removeItem("pendingDeletes");
+  };
+
+  useEffect(() => {
+    if (isOnline && !isSyncingRef.current) {
+      syncTransactions(); // insert
+      syncUpdates(); // update
+      syncDeletes(); // delete
+    }
+  }, [isOnline]);
+
   return (
     <>
       <Modal {...modalState} />
@@ -1716,7 +2240,6 @@ const PersonalFinanceApp = ({ user, handleLogout }) => {
                       Export Excel
                     </button>
                   </div>
-
                   <div className="bg-white p-6 rounded-xl shadow-md">
                     <h2 className="text-2xl font-semibold mb-4">
                       Daftar Transaksi
@@ -2006,15 +2529,30 @@ const AppWrapper = () => {
     return () => subscription.unsubscribe();
   }, []);
 
+  // sebelumnya: supabase.auth.signInWithOAuth({ provider: 'google' })
   const handleLogin = async () => {
     await supabase.auth.signInWithOAuth({
       provider: "google",
+      options: {
+        redirectTo: window.location.origin, // atau route khusus setelah login
+        queryParams: { prompt: "select_account" }, // ini kuncinya
+      },
     });
   };
 
   const handleLogout = async () => {
-    await supabase.auth.signOut();
+    // Putuskan semua sesi (default 'global' sudah cukup, atau eksplisitkan)
+    await supabase.auth.signOut({ scope: "global" });
+
+    // Bersihkan cache lokal yang berhubungan dengan user lama
+    localStorage.removeItem("transactions"); // atau prefix khusus
+    localStorage.removeItem("accounts");
+    localStorage.removeItem("categories");
+    // Jika kamu pakai prefix, bisa loop dan hapus yang match prefix
+
     setUser(null);
+    // Optional: paksa refresh UI agar state benar-benar bersih
+    // window.location.assign('/');
   };
 
   return user ? (
